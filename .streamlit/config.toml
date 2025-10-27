@@ -1,0 +1,10 @@
+[server]
+headless = true
+enableCORS = false
+port = $PORT
+[theme]
+primaryColor = "#1f77b4"
+backgroundColor = "#ffffff"
+secondaryBackgroundColor = "#f0f0f0"
+textColor = "#262730"
+font = "sans serif"

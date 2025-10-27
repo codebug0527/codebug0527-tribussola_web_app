@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+
+# Streamlit
+.streamlit/secrets.toml
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project specific
+ranking_graphs/
+*.log
+*.bat
+*.md
+generate_*.py
+*_FIX.md
+*_GUIDE.md
+*_CHECKLIST.md
+*_SUMMARY.md
+*_START.md
+requirements_*.txt
+setup.sh
+Procfile
