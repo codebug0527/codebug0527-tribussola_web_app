@@ -21,6 +21,14 @@ import io
 import json
 import tempfile
 import os
+from typing import Optional
+
+# Clustering helpers (provided by client)
+try:
+    from clustering_solutions import cluster_indices_gmm
+    CLUSTERING_AVAILABLE = True
+except Exception:
+    CLUSTERING_AVAILABLE = False
 
 # Optional imports for PDF generation
 try:
@@ -107,6 +115,7 @@ class TribussolaWebApp:
         self.s_data = None
         self.nomes_data = None
         self.solution_descriptions = None
+        self.cov_data = None  # holds covariance columns if available
         self.load_data()
         self.load_solution_descriptions()
     
@@ -122,7 +131,7 @@ class TribussolaWebApp:
                 st.info("Please ensure you have files with 'Zscores' and 'nomes' in their names.")
                 return False
             
-            # Load Z-scores data
+            # Load Z-scores data (may already include covariance columns)
             df = self._read_csv_smart(zscores_file)
             
             # Map columns (case-insensitive)
@@ -134,6 +143,21 @@ class TribussolaWebApp:
                 self.s_data = df[[cols_lower[n.lower()] for n in CANON_SIG]].copy()
                 self.v_data.columns = CANON_VAL
                 self.s_data.columns = CANON_SIG
+                # Try to capture covariance columns by name patterns
+                cov_cols = [c for c in df.columns if 'cov' in str(c).lower()]
+                if len(cov_cols) >= 3:
+                    # Heuristic ordering consistent with file headers
+                    # Expect something like cov(Zcusto,Zqual), cov(Zcusto,Zprazo), cov(Zqual,Zprazo)
+                    def _cov_sort_key(c):
+                        cl = str(c).lower()
+                        return (0 if 'custo' in cl and 'qual' in cl else
+                                1 if 'custo' in cl and 'prazo' in cl else
+                                2)
+                    cov_cols_sorted = sorted(cov_cols[:3], key=_cov_sort_key)
+                    self.cov_data = df[cov_cols_sorted].copy()
+                    self.cov_data.columns = [
+                        'cov_custo_qual', 'cov_custo_prazo', 'cov_qual_prazo'
+                    ]
             else:
                 # Positional mode
                 if df.shape[1] < 6:
@@ -144,6 +168,12 @@ class TribussolaWebApp:
                 self.s_data = df.iloc[:, sig_cols].copy()
                 self.v_data.columns = CANON_VAL
                 self.s_data.columns = CANON_SIG
+                # If covariance columns are present, capture them (expected at cols 6,7,8)
+                if df.shape[1] >= 9:
+                    self.cov_data = df.iloc[:, [6, 7, 8]].copy()
+                    self.cov_data.columns = [
+                        'cov_custo_qual', 'cov_custo_prazo', 'cov_qual_prazo'
+                    ]
             
             # Coerce to numeric
             for col in CANON_VAL:
@@ -221,15 +251,31 @@ class TribussolaWebApp:
         return df
     
     def compute_ranking(self, r: float, g: float, b: float) -> pd.DataFrame:
-        """Compute Z-ranking based on RGB input"""
+        """Compute Z-ranking and corrected uncertainty based on RGB input.
+        r,g,b are pure numbers in [0,1] and sum to 1.
+        """
         # Linear ranking: cost (-), quality (+), deadline (-)
         zrank = (-r) * self.v_data["ZCusto"] + (g) * self.v_data["ZQualidade"] + (-b) * self.v_data["ZPrazo"]
-        
-        # Error propagation
-        s_zrank = np.sqrt(((-r) * self.s_data["sZCusto"]) ** 2 + 
-                         ((g) * self.s_data["sZQualidade"]) ** 2 + 
-                         ((-b) * self.s_data["sZPrazo"]) ** 2)
-        
+
+        # Corrected uncertainty using client's formula
+        sC = self.s_data["sZCusto"]
+        sQ = self.s_data["sZQualidade"]
+        sP = self.s_data["sZPrazo"]
+
+        s0_sq = (1.0 / 9.0) * ( (r ** 2) * (sC ** 2) + (g ** 2) * (sQ ** 2) + (b ** 2) * (sP ** 2) )
+
+        if self.cov_data is not None:
+            c_cq = self.cov_data['cov_custo_qual']
+            c_cp = self.cov_data['cov_custo_prazo']
+            c_qp = self.cov_data['cov_qual_prazo']
+            cov_term = (2.0 / 9.0) * ( (r * g * (c_cq ** 2)) - (r * b * (c_cp ** 2)) + (2.0 * g * b * (c_qp ** 2)) )
+            s_z_sq = np.abs(s0_sq - cov_term)
+        else:
+            # Fallback to previous simple propagation if covariances not available
+            s_z_sq = ( ( (-r) * sC ) ** 2 + ( (g) * sQ ) ** 2 + ( (-b) * sP ) ** 2 )
+
+        s_zrank = np.sqrt(s_z_sq)
+
         out = pd.DataFrame({"Zranking": zrank, "s_Zranking": s_zrank})
         return out
     
@@ -238,14 +284,13 @@ class TribussolaWebApp:
         # Join with names
         joined = ranking.join(self.nomes_data, how="left")
         
-        # Add rank column
+        # Add rank column with ties (same score => same rank)
         joined = (joined
                  .reset_index()
                  .rename(columns={"index": "idx"})
-                 .sort_values("Zranking", ascending=False)
-                 .reset_index(drop=True))
-        
-        joined["Rank"] = range(1, len(joined) + 1)
+                 .sort_values("Zranking", ascending=False))
+        joined["Rank"] = joined["Zranking"].rank(method='min', ascending=False).astype(int)
+        joined = joined.reset_index(drop=True)
         
         # Get solution name
         name_col = next((c for c in self.nomes_data.columns 
@@ -329,21 +374,53 @@ def create_ranking_plot(ranking_df):
     # Create horizontal bar chart
     fig = go.Figure()
     
-    # Add bars with error bars
-    fig.add_trace(go.Bar(
-        y=ranking_df['Solution'],
-        x=ranking_df['Zranking'],
-        error_x=dict(type='data', array=ranking_df['s_Zranking']),
-        orientation='h',
-        marker=dict(
-            color=ranking_df['Zranking'],
-            colorscale='Viridis',
-            showscale=True,
-            colorbar=dict(title="Z-Ranking Score")
-        ),
-        text=[f"Rank {row['Rank']}" for _, row in ranking_df.iterrows()],
-        textposition='outside'
-    ))
+    # Decide coloring: clusters if available, else by score
+    if 'cluster' in ranking_df.columns:
+        clusters = ranking_df['cluster'].astype(int).fillna(-1)
+        unique_clusters = sorted(clusters.unique())
+        # Map clusters to colors
+        palette = [
+            '#636EFA', '#EF553B', '#00CC96', '#AB63FA', '#FFA15A',
+            '#19D3F3', '#FF6692', '#B6E880', '#FF97FF', '#FECB52'
+        ]
+        cluster_to_color = {c: palette[i % len(palette)] for i, c in enumerate(unique_clusters)}
+        bar_colors = clusters.map(cluster_to_color)
+        hover_text = [f"Rank {row['Rank']} • Cluster {int(row['cluster'])}"
+                      if not pd.isna(row.get('cluster')) else f"Rank {row['Rank']}"
+                      for _, row in ranking_df.iterrows()]
+        fig.add_trace(go.Bar(
+            y=ranking_df['Solution'],
+            x=ranking_df['Zranking'],
+            error_x=dict(type='data', array=ranking_df['s_Zranking']),
+            orientation='h',
+            marker=dict(color=bar_colors),
+            text=hover_text,
+            textposition='outside',
+            hovertemplate='%{y}<br>Z=%{x:.3f} ± %{customdata:.3f}<br>%{text}<extra></extra>',
+            customdata=ranking_df['s_Zranking']
+        ))
+        # Add legend by dummy traces
+        for c in unique_clusters:
+            fig.add_trace(go.Bar(
+                x=[None], y=[None], name=f"Cluster {int(c)}",
+                marker=dict(color=cluster_to_color[c])
+            ))
+    else:
+        # Add bars with error bars colored by value
+        fig.add_trace(go.Bar(
+            y=ranking_df['Solution'],
+            x=ranking_df['Zranking'],
+            error_x=dict(type='data', array=ranking_df['s_Zranking']),
+            orientation='h',
+            marker=dict(
+                color=ranking_df['Zranking'],
+                colorscale='Viridis',
+                showscale=True,
+                colorbar=dict(title="Z-Ranking Score")
+            ),
+            text=[f"Rank {row['Rank']}" for _, row in ranking_df.iterrows()],
+            textposition='outside'
+        ))
     
     fig.update_layout(
         title="Solution Rankings - Z-Score Analysis",
@@ -354,6 +431,36 @@ def create_ranking_plot(ranking_df):
         yaxis={'categoryorder': 'total ascending'}
     )
     
+    return fig
+
+def create_grade_plot(ranking_df):
+    """Create 0–10 relative grade plot above original Zranking plot"""
+    df = ranking_df.copy()
+    z = df['Zranking']
+    if len(z) > 0 and (z.max() - z.min()) > 0:
+        grade = 10.0 * (z - z.min()) / (z.max() - z.min())
+    else:
+        grade = np.full_like(z, 5.0)
+    df['Grade0_10'] = grade
+
+    fig = go.Figure()
+    fig.add_trace(go.Bar(
+        y=df['Solution'],
+        x=df['Grade0_10'],
+        orientation='h',
+        marker=dict(color=df['Grade0_10'], colorscale='Bluered', showscale=True,
+                    colorbar=dict(title="Grade (0–10)")),
+        text=[f"{g:.1f}" for g in df['Grade0_10']],
+        textposition='outside'
+    ))
+    fig.update_layout(
+        title="Relative Grade (0–10)",
+        xaxis_title="Grade (0–10)",
+        yaxis_title="Solutions",
+        height=500,
+        showlegend=False,
+        yaxis={'categoryorder': 'total ascending'}
+    )
     return fig
 
 def create_interactive_tree(app):
@@ -825,6 +932,24 @@ def main():
         if st.button("🔄 Analyze Solutions", type="primary"):
             ranking = app.compute_ranking(r, g, b)
             full_ranking = app.get_full_ranking(ranking)
+            # Clustering on [Zranking, s_Zranking]
+            if CLUSTERING_AVAILABLE:
+                out = full_ranking[["Zranking", "s_Zranking"]].copy()
+                try:
+                    labels, cluster_meta, probabilities = cluster_indices_gmm(out, use_uncertainty=True)
+                except Exception as e:
+                    labels, cluster_meta, probabilities = (None, None, None)
+                if labels is not None:
+                    full_ranking = full_ranking.copy()
+                    full_ranking["cluster"] = labels
+                    if probabilities is not None:
+                        full_ranking["cluster_probability"] = np.max(probabilities, axis=1)
+                    # Persist metadata
+                    try:
+                        with open("gmm_clusters_meta.json", "w", encoding="utf-8") as f:
+                            json.dump(cluster_meta, f, ensure_ascii=False, indent=2)
+                    except Exception:
+                        pass
             
             # Store in session state
             st.session_state.ranking = full_ranking
@@ -838,19 +963,19 @@ def main():
         if 'ranking' in st.session_state:
             ranking_df = st.session_state.ranking
             
-            # Display top 3 with special styling
-            st.markdown("### 🏆 Top 3 Solutions")
-            top3 = ranking_df.head(3)
-            
-            for i, (_, row) in enumerate(top3.iterrows()):
-                medal = "🥇" if i == 0 else "🥈" if i == 1 else "🥉"
-                color_class = "gold" if i == 0 else "silver" if i == 1 else "bronze"
-                
+            # Display podium with ties supported
+            st.markdown("### 🏆 Podium (with ties)")
+            podium = ranking_df[ranking_df['Rank'] <= 3]
+            for rank in sorted(podium['Rank'].unique()):
+                group = podium[podium['Rank'] == rank]
+                medal = "🥇" if rank == 1 else "🥈" if rank == 2 else "🥉"
+                color_class = "gold" if rank == 1 else "silver" if rank == 2 else "bronze"
+                names = ", ".join(group['Solution'].astype(str).tolist())
+                zvals = "; ".join([f"{z:.3f} ± {s:.3f}" for z, s in zip(group['Zranking'], group['s_Zranking'])])
                 st.markdown(f"""
                 <div class="ranking-card">
-                    <h4 class="{color_class}">{medal} Rank {row['Rank']}: {row['Solution']}</h4>
-                    <p><strong>Z-Ranking:</strong> {row['Zranking']:.3f} ± {row['s_Zranking']:.3f}</p>
-                    <p><strong>Coordinates:</strong> {row['Coordinates']}</p>
+                    <h4 class="{color_class}">{medal} Rank {rank}: {names}</h4>
+                    <p><strong>Z-Ranking(s):</strong> {zvals}</p>
                 </div>
                 """, unsafe_allow_html=True)
             
@@ -897,6 +1022,10 @@ def main():
         
         if 'ranking' in st.session_state:
             ranking_df = st.session_state.ranking
+            # Grade plot (0–10) above
+            grade_fig = create_grade_plot(ranking_df)
+            st.plotly_chart(grade_fig, use_container_width=True)
+            # Original Zranking plot below
             fig = create_ranking_plot(ranking_df)
             st.plotly_chart(fig, use_container_width=True)
             
