@@ -463,147 +463,348 @@ def create_grade_plot(ranking_df):
     )
     return fig
 
+def create_visual_tree_diagram(app):
+    """Create interactive visual tree diagram using Plotly"""
+    if not app.solution_descriptions or 'itens' not in app.solution_descriptions:
+        return None
+    
+    items = app.solution_descriptions['itens']
+    
+    # Build tree structure matching the client's image
+    # Use a better layout: top to bottom, left to right
+    
+    tree_nodes = {}
+    
+    # Level 0: Root
+    tree_nodes['Seu Problema'] = {
+        'type': 'root', 'level': 0, 'parent': None,
+        'pos': (100, 90)
+    }
+    
+    # Level 1: Main branches
+    tree_nodes['Soluções Prontas'] = {
+        'type': 'branch', 'level': 1, 'parent': 'Seu Problema', 'tronco': 'I',
+        'pos': (20, 60)
+    }
+    tree_nodes['IA por API'] = {
+        'type': 'branch', 'level': 1, 'parent': 'Seu Problema', 'tronco': 'II',
+        'pos': (60, 60)
+    }
+    tree_nodes['IA Própria'] = {
+        'type': 'branch', 'level': 1, 'parent': 'Seu Problema', 'tronco': 'III',
+        'pos': (100, 60)
+    }
+    
+    # Level 2: Sub-branches
+    tree_nodes['Sem Anonimização'] = {
+        'type': 'sub', 'level': 2, 'parent': 'IA por API', 'tronco': 'II',
+        'pos': (50, 35)
+    }
+    tree_nodes['Com Anonimização'] = {
+        'type': 'sub', 'level': 2, 'parent': 'IA por API', 'tronco': 'II',
+        'pos': (70, 35)
+    }
+    
+    tree_nodes['PLIM 2.0 em DMZ'] = {
+        'type': 'sub', 'level': 2, 'parent': 'IA Própria', 'tronco': 'III',
+        'pos': (90, 35)
+    }
+    tree_nodes['Com Engenharia Reversa'] = {
+        'type': 'sub', 'level': 2, 'parent': 'IA Própria', 'tronco': 'III',
+        'pos': (110, 35)
+    }
+    
+    # Group solutions by their parent branch
+    solution_groups = {
+        'Soluções Prontas': [],
+        'Sem Anonimização': [],
+        'Com Anonimização': [],
+        'PLIM 2.0 em DMZ': [],
+        'Com Engenharia Reversa': []
+    }
+    
+    for item in items:
+        item_id = item['id']
+        item_name = item['nome']
+        tronco = item['tronco']
+        
+        if tronco == 'I':
+            solution_groups['Soluções Prontas'].append((item_id, item_name))
+        elif tronco == 'II':
+            if item_id.startswith('II.1'):
+                solution_groups['Sem Anonimização'].append((item_id, item_name))
+            elif item_id.startswith('II.2'):
+                solution_groups['Com Anonimização'].append((item_id, item_name))
+        elif tronco == 'III':
+            if item_id == 'III.1.b':
+                solution_groups['PLIM 2.0 em DMZ'].append((item_id, item_name))
+            else:
+                solution_groups['Com Engenharia Reversa'].append((item_id, item_name))
+    
+    # Add solution leaves with proper positioning
+    for parent_name, solutions in solution_groups.items():
+        parent_x = tree_nodes[parent_name]['pos'][0]
+        total = len(solutions)
+        
+        for idx, (item_id, item_name) in enumerate(solutions):
+            # Spread solutions horizontally under their parent
+            if total == 1:
+                x_pos = parent_x
+            else:
+                spread = min(30, total * 8)  # Maximum spread
+                x_pos = parent_x + (idx - (total - 1) / 2) * (spread / max(1, total - 1))
+            
+            tree_nodes[item_name] = {
+                'type': 'leaf',
+                'level': 3,
+                'parent': parent_name,
+                'id': item_id,
+                'tronco': tronco,
+                'pos': (x_pos, 10)
+            }
+    
+    # Create figure with dark background
+    fig = go.Figure()
+    
+    # Add edges (connections)
+    for node_name, node_data in tree_nodes.items():
+        if node_data['parent']:
+            parent_data = tree_nodes[node_data['parent']]
+            x0, y0 = parent_data['pos']
+            x1, y1 = node_data['pos']
+            
+            # Determine color and width
+            if node_data['type'] == 'branch':
+                color = '#3498db'
+                width = 3
+            elif node_data['type'] == 'sub':
+                color = '#16a085'
+                width = 2.5
+            else:  # leaf
+                color = '#e74c3c'
+                width = 2
+            
+            # Create curved line for better visual
+            x_curve = [x0, (x0 + x1) / 2, (x0 + x1) / 2, x1]
+            y_curve = [y0, y0 + abs(y0 - y1) * 0.3, y1 + abs(y0 - y1) * 0.3, y1]
+            
+            fig.add_trace(go.Scatter(
+                x=x_curve,
+                y=y_curve,
+                mode='lines',
+                line=dict(color=color, width=width),
+                hoverinfo='none',
+                showlegend=False
+            ))
+    
+    # Add nodes
+    for node_name, node_data in tree_nodes.items():
+        x, y = node_data['pos']
+        
+        # Node styling
+        if node_data['type'] == 'root':
+            color = '#e74c3c'
+            size = 35
+            textcolor = 'white'
+            textsize = 14
+        elif node_data['type'] == 'branch':
+            color = '#3498db'
+            size = 25
+            textcolor = 'white'
+            textsize = 12
+        elif node_data['type'] == 'sub':
+            color = '#16a085'
+            size = 20
+            textcolor = 'white'
+            textsize = 10
+        else:  # leaf
+            color = '#95a5a6'
+            size = 15
+            textcolor = 'white'
+            textsize = 8
+        
+        custom_data = [node_data.get('id', '')] if node_data.get('id') else None
+        hover_text = f"<b>{node_name}</b>"
+        if node_data.get('id'):
+            hover_text += f"<br>ID: {node_data.get('id')}"
+        hover_text += "<extra></extra>"
+        
+        fig.add_trace(go.Scatter(
+            x=[x],
+            y=[y],
+            mode='markers+text',
+            marker=dict(
+                size=size,
+                color=color,
+                line=dict(width=3, color='white')
+            ),
+            text=node_name,
+            textposition="middle center",
+            textfont=dict(size=textsize, color=textcolor),
+            hovertemplate=hover_text,
+            customdata=custom_data,
+            name=node_data.get('id', node_name),
+            showlegend=False
+        ))
+    
+    fig.update_layout(
+        title={
+            'text': '🌳 Your Problem → Solution Decision Tree',
+            'font': {'size': 20, 'color': 'white'},
+            'x': 0.5,
+            'xanchor': 'center'
+        },
+        xaxis=dict(showgrid=False, zeroline=False, showticklabels=False, range=[0, 130]),
+        yaxis=dict(showgrid=False, zeroline=False, showticklabels=False, range=[0, 100]),
+        plot_bgcolor='#2c3e50',
+        paper_bgcolor='#2c3e50',
+        height=700,
+        showlegend=False,
+        margin=dict(l=10, r=10, t=60, b=10)
+    )
+    
+    return fig
+
 def create_interactive_tree(app):
     """Create interactive hierarchical tree structure with clickable nodes"""
     st.markdown("### 🌳 Interactive Solution Tree")
-    st.markdown("Click on any solution to view detailed information:")
+    st.markdown("**Use the tree diagram and clickable solutions below to explore:**")
     
     if not app.solution_descriptions:
         st.error("❌ Solution descriptions not available. Please ensure solution_descriptions.json is present.")
         return
     
-    # Create tree structure based on coordinates from CSV
-    tree_data = {}
-    for _, row in app.nomes_data.iterrows():
-        # Handle different possible column names for coordinates
-        coord_col = None
-        name_col = None
+    # Create visual tree diagram
+    tree_fig = create_visual_tree_diagram(app)
+    
+    if tree_fig:
+        st.plotly_chart(tree_fig, use_container_width=True)
+    
+    # Create solution list with clickable buttons
+    st.markdown("---")
+    st.markdown("### 📝 Solutions (Click to View Details)")
+    
+    if 'itens' in app.solution_descriptions:
+        items = app.solution_descriptions['itens']
         
-        # Find coordinate column (case-insensitive)
-        for col in app.nomes_data.columns:
-            if 'coordenadas' in col.lower() or 'coordinates' in col.lower():
-                coord_col = col
-                break
+        # Organize by Tronco
+        troncos = {}
+        for item in items:
+            tronco = item.get('tronco', 'Unknown')
+            if tronco not in troncos:
+                troncos[tronco] = []
+            troncos[tronco].append(item)
         
-        # Find name column (case-insensitive)
-        for col in app.nomes_data.columns:
-            if col.lower() in ['nome', 'name', 'titulo', 'title']:
-                name_col = col
-                break
-        
-        if coord_col and name_col:
-            coord = row[coord_col]
-            name = row[name_col]
-            tree_data[coord] = name
-        else:
-            st.error(f"❌ Could not find coordinate or name columns in CSV. Available columns: {list(app.nomes_data.columns)}")
-            return
-    
-    # Group by level
-    levels = {}
-    for coord, name in tree_data.items():
-        level = coord.split('.')[0]
-        if level not in levels:
-            levels[level] = []
-        levels[level].append((coord, name))
-    
-    # Create interactive tree with clickable nodes
-    st.markdown("#### Solution Hierarchy")
-    
-    # Create columns for better layout
-    col1, col2 = st.columns([2, 1])
-    
-    with col1:
-        # Display tree structure
-        for level in sorted(levels.keys()):
-            st.markdown(f"**Level {level}**")
-            for coord, name in levels[level]:
-                # Create clickable button for each solution
-                if st.button(f"🌿 {coord}: {name}", key=f"tree_{coord}", help=f"Click to view details for {name}"):
-                    st.session_state.selected_solution = coord
-            st.markdown("---")
-    
-        with col2:
-            # Display selected solution details
-            if 'selected_solution' in st.session_state:
-                coord = st.session_state.selected_solution
-                # Check new structure first (itens), then fallback to old structure (solutions)
-                if 'itens' in app.solution_descriptions:
-                    # New structure
-                    items = app.solution_descriptions['itens']
-                    solution = next((item for item in items if item['id'] == coord), None)
-                    
-                    if solution:
-                        st.markdown("### 📋 Solution Details")
-                        st.markdown(f"**{solution['nome']}**")
-                        st.markdown(f"*ID: {solution['id']} | Tronco: {solution['tronco']}*")
-                        
-                        st.markdown("#### Descrição")
-                        st.write(solution['descricao'])
-                        
-                        st.markdown("#### Escopo")
-                        st.write(" • " + " \\n • ".join(solution['escopo']))
-                        
-                        st.markdown("#### Custos e Prazos")
-                        st.metric("CAPEX (BRL)", f"R$ {solution['capex_brl']:,.0f}")
-                        st.metric("OPEX Mensal (BRL)", f"R$ {solution['opex_mensal_brl']:,.0f}")
-                        st.metric("Prazo Total (dias)", f"{solution['prazos_dias']['total']} ± {solution['prazos_dias']['sigma']}")
-                        
-                        st.markdown("#### Qualidade")
-                        qual = solution['qualidade_objetiva']
-                        st.write(f"**Dedução Top3:** {qual['deduplicacao_top3_pct']}")
-                        st.write(f"**Latência:** {qual['latencia_seg']}s")
-                        st.write(f"**Cobertura:** {qual['cobertura_classificacao_pct']}")
-                        
-                        st.markdown("#### Benefícios")
-                        for benef in solution['beneficios']:
-                            st.markdown(f"✅ {benef}")
-                        
-                        st.markdown("#### Limitações")
-                        for limit in solution['limitacoes']:
-                            st.markdown(f"⚠️ {limit}")
-                        
-                        st.markdown("#### Quando Escolher")
-                        st.write(solution['quando_escolher'])
-                        
-                        # Add close button
-                        if st.button("❌ Close Details", key=f"close_{coord}"):
-                            del st.session_state.selected_solution
+        # Create expandable sections for each Tronco
+        for tronco in sorted(troncos.keys()):
+            tronco_name = f"Tronco {tronco}"
+            if tronco == 'I':
+                tronco_name = "🔷 Soluções Prontas"
+            elif tronco == 'II':
+                tronco_name = "🔶 IA por API"
+            elif tronco == 'III':
+                tronco_name = "🔸 IA Própria"
             
-                elif 'solutions' in app.solution_descriptions:
-                    # Old structure (backward compatibility)
-                    if coord in app.solution_descriptions['solutions']:
-                        solution = app.solution_descriptions['solutions'][coord]
-                        
-                        st.markdown("### 📋 Solution Details")
-                        st.markdown(f"**{solution['name']}**")
-                        st.markdown(f"*Coordinates: {solution['coordinates']}*")
-                        
-                        st.markdown("#### Description")
-                        st.write(solution['description'])
-                        
-                        st.markdown("#### Technical Details")
-                        tech_details = solution['technical_details']
-                        for key, value in tech_details.items():
-                            st.markdown(f"**{key.replace('_', ' ').title()}:** {value}")
-                        
-                        st.markdown("#### Pros")
-                        for pro in solution['pros']:
-                            st.markdown(f"✅ {pro}")
-                        
-                        st.markdown("#### Cons")
-                        for con in solution['cons']:
-                            st.markdown(f"❌ {con}")
-                        
-                        st.markdown("#### Use Cases")
-                        for use_case in solution['use_cases']:
-                            st.markdown(f"🎯 {use_case}")
-                        
-                        # Add close button
-                        if st.button("❌ Close Details", key=f"close_{coord}"):
-                            del st.session_state.selected_solution
-            else:
-                st.info("👆 Click on any solution in the tree to view detailed information.")
+            with st.expander(tronco_name):
+                # Create button grid
+                for item in sorted(troncos[tronco], key=lambda x: x.get('id', '')):
+                    col1, col2 = st.columns([3, 1])
+                    with col1:
+                        button_label = f"🌿 {item['id']}: {item['nome']}"
+                    with col2:
+                        if st.button("View Details", key=f"btn_{item['id']}"):
+                            st.session_state.selected_solution = item['id']
+    
+    # Display selected solution details
+    if 'selected_solution' in st.session_state:
+        coord = st.session_state.selected_solution
+        
+        # Check new structure first (itens), then fallback to old structure (solutions)
+        if 'itens' in app.solution_descriptions:
+            # New structure
+            items = app.solution_descriptions['itens']
+            solution = next((item for item in items if item['id'] == coord), None)
+            
+            if solution:
+                st.markdown("---")
+                st.markdown("### 📋 Solution Details")
+                
+                col1, col2 = st.columns([3, 1])
+                with col1:
+                    st.markdown(f"**{solution['nome']}**")
+                    st.markdown(f"*ID: {solution['id']} | Tronco: {solution['tronco']}*")
+                with col2:
+                    if st.button("❌ Close Details", key=f"close_{coord}"):
+                        del st.session_state.selected_solution
+                
+                st.markdown("#### Descrição")
+                st.write(solution['descricao'])
+                
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.markdown("#### 📊 Custos e Prazos")
+                    st.metric("CAPEX (BRL)", f"R$ {solution['capex_brl']:,.0f}")
+                    st.metric("OPEX Mensal (BRL)", f"R$ {solution['opex_mensal_brl']:,.0f}")
+                    st.metric("Prazo Total (dias)", f"{solution['prazos_dias']['total']} ± {solution['prazos_dias']['sigma']}")
+                    
+                    st.markdown("#### ⚖️ Qualidade")
+                    qual = solution['qualidade_objetiva']
+                    st.write(f"**Dedução Top3:** {qual['deduplicacao_top3_pct']}")
+                    st.write(f"**Latência:** {qual['latencia_seg']}s")
+                    st.write(f"**Cobertura:** {qual['cobertura_classificacao_pct']}")
+                
+                with col2:
+                    st.markdown("#### ✅ Benefícios")
+                    for benef in solution['beneficios']:
+                        st.markdown(f"• {benef}")
+                    
+                    st.markdown("#### ⚠️ Limitações")
+                    for limit in solution['limitacoes']:
+                        st.markdown(f"• {limit}")
+                
+                st.markdown("#### 🎯 Quando Escolher")
+                st.info(solution['quando_escolher'])
+                
+                if 'extensoes_futuras' in solution and solution['extensoes_futuras']:
+                    st.markdown("#### 🔮 Extensões Futuras")
+                    for ext in solution['extensoes_futuras']:
+                        st.markdown(f"• {ext}")
+        
+        elif 'solutions' in app.solution_descriptions:
+            # Old structure (backward compatibility)
+            if coord in app.solution_descriptions['solutions']:
+                solution = app.solution_descriptions['solutions'][coord]
+                
+                st.markdown("---")
+                st.markdown("### 📋 Solution Details")
+                
+                col1, col2 = st.columns([3, 1])
+                with col1:
+                    st.markdown(f"**{solution['name']}**")
+                    st.markdown(f"*Coordinates: {solution['coordinates']}*")
+                with col2:
+                    if st.button("❌ Close Details", key=f"close_{coord}"):
+                        del st.session_state.selected_solution
+                
+                st.markdown("#### Description")
+                st.write(solution['description'])
+                
+                st.markdown("#### Technical Details")
+                tech_details = solution['technical_details']
+                for key, value in tech_details.items():
+                    st.markdown(f"**{key.replace('_', ' ').title()}:** {value}")
+                
+                st.markdown("#### Pros")
+                for pro in solution['pros']:
+                    st.markdown(f"✅ {pro}")
+                
+                st.markdown("#### Cons")
+                for con in solution['cons']:
+                    st.markdown(f"❌ {con}")
+                
+                st.markdown("#### Use Cases")
+                for use_case in solution['use_cases']:
+                    st.markdown(f"🎯 {use_case}")
 
 def create_static_perspective():
     """Create static perspective analysis view"""
